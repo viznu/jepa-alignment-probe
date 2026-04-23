@@ -13,7 +13,7 @@ data/
 *.safetensors
 *.ckpt
 
-# Local result artifacts (figures are kept)
-results/*.json
+# Local result artifacts (figures are kept; named iter*.json results are tracked)
+results/_*.json
 results/*.pkl
 results/*.npy
