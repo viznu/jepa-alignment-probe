@@ -14,8 +14,12 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def extract(model_name: str, prompts: list[str], device: str, dtype: torch.dtype,
-            output_path: Path, max_len: int):
+def run_extraction(model_name: str, prompts: list[str], device: str, dtype: torch.dtype,
+                   max_len: int) -> tuple[torch.Tensor, int, int]:
+    """Forward-hook each transformer block, capture last-token residual stream.
+
+    Returns: (trajectories (N, L, d) fp32 on CPU, L, d)
+    """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device).eval()
 
@@ -48,17 +52,7 @@ def extract(model_name: str, prompts: list[str], device: str, dtype: torch.dtype
 
     for h in handles:
         h.remove()
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "trajectories": trajectories,
-        "prompts": prompts,
-        "model_name": model_name,
-        "num_layers": L,
-        "hidden_dim": d,
-        "token_position": "last_prompt_token",
-    }, output_path)
-    print(f"saved shape={tuple(trajectories.shape)} -> {output_path}")
+    return trajectories, L, d
 
 
 def main():
@@ -77,7 +71,19 @@ def main():
     ds = load_dataset(args.dataset, split="train")
     prompts = [x["instruction"] for x in ds.shuffle(seed=args.seed).select(range(args.n_prompts))]
 
-    extract(args.model, prompts, device, dtype, Path(args.output), args.max_len)
+    traj, L, d = run_extraction(args.model, prompts, device, dtype, args.max_len)
+
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "trajectories": traj,
+        "prompts": prompts,
+        "model_name": args.model,
+        "num_layers": L,
+        "hidden_dim": d,
+        "token_position": "last_prompt_token",
+    }, out)
+    print(f"saved shape={tuple(traj.shape)} -> {out}")
 
 
 if __name__ == "__main__":
