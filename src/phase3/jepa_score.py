@@ -55,6 +55,11 @@ def jepa_score_one(encoder: LayerJEPA, x: torch.Tensor, pool: str = "mean") -> f
         z = encoder.encode(xi)  # (1, L, d_model)
         if pool == "mean":
             return z.mean(dim=1)  # (1, d_model)
+        if pool == "last":
+            return z[:, -1, :]  # (1, d_model) — last transformer-layer slot
+        if pool == "mid":
+            mid = z.size(1) // 2
+            return z[:, mid, :]
         raise ValueError(pool)
 
     J = jacobian(enc_pool, x)  # (1, d_model, 1, L, d_in)
