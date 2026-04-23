@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 
 from src.phase3.probes import (
     SingleLayerProbe, AllLayersConcatProbe, TransformerOverLayersProbe, JEPAFrozenProbe,
@@ -60,6 +60,8 @@ def main():
     p.add_argument("--transformer_epochs", type=int, default=30)
     p.add_argument("--n_trains", type=int, nargs="+",
                    default=[5, 10, 20, 40, 80, 160])
+    p.add_argument("--group_field", default=None,
+                   help="If set (e.g. 'fact_ids'), split test out by group.")
     args = p.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -71,9 +73,15 @@ def main():
     print(f"N={N} L={L} d={d}  pos={int(labels.sum())}  neg={int((1-labels).sum())}")
 
     idx = np.arange(N)
-    tr_pool, te_idx = train_test_split(
-        idx, test_size=args.test_frac, stratify=y_np, random_state=42,
-    )
+    if args.group_field and args.group_field in blob:
+        groups = blob[args.group_field].numpy() if torch.is_tensor(blob[args.group_field]) else np.asarray(blob[args.group_field])
+        splitter = GroupShuffleSplit(n_splits=1, test_size=args.test_frac, random_state=42)
+        tr_pool, te_idx = next(splitter.split(idx, y_np, groups))
+        print(f"group-aware split by '{args.group_field}' ({len(np.unique(groups))} groups)")
+    else:
+        tr_pool, te_idx = train_test_split(
+            idx, test_size=args.test_frac, stratify=y_np, random_state=42,
+        )
     te_idx_t = torch.tensor(te_idx)
     Xte = traj[te_idx_t]
     yte = labels[te_idx_t]

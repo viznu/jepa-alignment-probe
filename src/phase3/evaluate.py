@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, GroupShuffleSplit
 from sklearn.metrics import roc_auc_score, roc_curve
 
 from src.phase3.probes import (
@@ -58,6 +58,8 @@ def main():
     p.add_argument("--test_frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--transformer_epochs", type=int, default=30)
+    p.add_argument("--group_field", default=None,
+                   help="If set (e.g. 'fact_ids'), split by group so paired examples stay together.")
     args = p.parse_args()
 
     blob = torch.load(args.data, map_location="cpu", weights_only=False)
@@ -67,9 +69,15 @@ def main():
     print(f"loaded {args.data}: N={N}  L={L}  d={d}  pos={int(labels.sum())} neg={int((1-labels).sum())}")
 
     idx = np.arange(N)
-    tr_idx, te_idx = train_test_split(
-        idx, test_size=args.test_frac, stratify=labels.numpy(), random_state=args.seed,
-    )
+    if args.group_field and args.group_field in blob:
+        groups = blob[args.group_field].numpy() if torch.is_tensor(blob[args.group_field]) else np.asarray(blob[args.group_field])
+        splitter = GroupShuffleSplit(n_splits=1, test_size=args.test_frac, random_state=args.seed)
+        tr_idx, te_idx = next(splitter.split(idx, labels.numpy(), groups))
+        print(f"group-aware split by '{args.group_field}' ({len(np.unique(groups))} groups)")
+    else:
+        tr_idx, te_idx = train_test_split(
+            idx, test_size=args.test_frac, stratify=labels.numpy(), random_state=args.seed,
+        )
     tr_idx_t = torch.tensor(tr_idx)
     te_idx_t = torch.tensor(te_idx)
     Xtr, ytr = traj[tr_idx_t], labels[tr_idx_t]

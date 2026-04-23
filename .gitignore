@@ -5,8 +5,11 @@ __pycache__/
 venv/
 .env
 
-# Large data / model files — should live on HF Hub or local disk, not git
-data/
+# Large data / model files — should live on HF Hub or local disk, not git.
+# Exception: data/external/ holds small reference datasets (CSVs from
+# external sources that we want version-tracked).
+data/*
+!data/external/
 *.pt
 *.pth
 *.bin
