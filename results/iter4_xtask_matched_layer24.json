@@ -1,0 +1,19 @@
+{
+  "jepa": "results/jepa_infonceonly.pt",
+  "src": "data/instructed_pairs.pt",
+  "tgt": "data/refusal_pairs_matched.pt",
+  "pool": "layer",
+  "layer_idx": 24,
+  "N_src_train": 488,
+  "N_src_test": 124,
+  "N_tgt": 200,
+  "indist": {
+    "auroc": 0.9958376690946931,
+    "recall_at_1pct_fpr": 0.967741935483871
+  },
+  "transfer": {
+    "auroc": 0.9581999999999998,
+    "recall_at_1pct_fpr": 0.86
+  },
+  "gap_auroc": 0.03763766909469324
+}
