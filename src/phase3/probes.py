@@ -123,11 +123,17 @@ class _TransformerClassifier(nn.Module):
 
 class JEPAFrozenProbe:
     """Use a frozen trained JEPA encoder as feature extractor, then logistic on pooled latent."""
-    def __init__(self, jepa_ckpt_path: str, device: str = "cpu", C: float = 0.1, max_iter: int = 2000):
+    def __init__(self, jepa_ckpt_path: str, device: str = "cpu", C: float = 0.1, max_iter: int = 2000,
+                 pool: str = "mean", layer_idx: int | None = None,
+                 window_start: int | None = None, window_end: int | None = None):
         from src.phase2.model import LayerJEPA
         ckpt = torch.load(jepa_ckpt_path, map_location=device, weights_only=False)
         cfg = ckpt["config"]
         self.device = device
+        self.pool = pool
+        self.layer_idx = layer_idx
+        self.window_start = window_start
+        self.window_end = window_end
         self.encoder = LayerJEPA(
             d_in=ckpt["d_in"], d_model=cfg["d_model"],
             num_layers=cfg["jepa_layers"], num_heads=cfg["heads"],
@@ -144,7 +150,23 @@ class JEPAFrozenProbe:
     def _featurize(self, traj):
         x = ((traj.cpu() - self.jepa_mean) / self.jepa_std).to(self.device)
         z = self.encoder.encode(x)  # (N, L, d_model)
-        return z.mean(dim=1).cpu().numpy()  # pooled over layers
+        if self.pool == "mean":
+            feat = z.mean(dim=1)
+        elif self.pool == "last":
+            feat = z[:, -1, :]
+        elif self.pool == "mid":
+            feat = z[:, z.size(1) // 2, :]
+        elif self.pool == "layer":
+            if self.layer_idx is None:
+                raise ValueError("pool='layer' requires layer_idx")
+            feat = z[:, self.layer_idx, :]
+        elif self.pool == "window":
+            if self.window_start is None or self.window_end is None:
+                raise ValueError("pool='window' requires window_start and window_end")
+            feat = z[:, self.window_start:self.window_end, :].mean(dim=1)
+        else:
+            raise ValueError(f"unknown JEPA pooling mode: {self.pool}")
+        return feat.cpu().numpy()
 
     def fit(self, traj, y, traj_val=None, y_val=None):
         X = self._featurize(traj)

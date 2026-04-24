@@ -25,6 +25,7 @@ from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from src.phase3.probes import (
     SingleLayerProbe, AllLayersConcatProbe, TransformerOverLayersProbe, JEPAFrozenProbe,
 )
+from src.phase3.pair_transforms import apply_pair_transform
 
 
 def stratified_subsample(idx_pool: np.ndarray, labels: np.ndarray,
@@ -39,13 +40,21 @@ def stratified_subsample(idx_pool: np.ndarray, labels: np.ndarray,
 
 
 def build_probes(d: int, L: int, jepa_ckpt: str, single_layer: int, device: str,
-                 transformer_epochs: int) -> dict:
+                 transformer_epochs: int, jepa_pool: str, jepa_layer_idx: int | None,
+                 jepa_window_start: int | None, jepa_window_end: int | None) -> dict:
     return {
         "single_layer": lambda: SingleLayerProbe(layer=single_layer),
         "all_layers_concat": lambda: AllLayersConcatProbe(),
         "transformer_over_layers": lambda: TransformerOverLayersProbe(
             d_in=d, epochs=transformer_epochs, device=device),
-        "jepa_frozen": lambda: JEPAFrozenProbe(jepa_ckpt, device=device),
+        "jepa_frozen": lambda: JEPAFrozenProbe(
+            jepa_ckpt,
+            device=device,
+            pool=jepa_pool,
+            layer_idx=jepa_layer_idx,
+            window_start=jepa_window_start,
+            window_end=jepa_window_end,
+        ),
     }
 
 
@@ -62,11 +71,23 @@ def main():
                    default=[5, 10, 20, 40, 80, 160])
     p.add_argument("--group_field", default=None,
                    help="If set (e.g. 'fact_ids'), split test out by group.")
+    p.add_argument("--trajectory_transform", default="none",
+                   choices=["none", "pair_residualize", "pair_signed_delta"])
+    p.add_argument("--jepa_pool", default="mean",
+                   choices=["mean", "last", "mid", "layer", "window"])
+    p.add_argument("--jepa_layer_idx", type=int, default=None)
+    p.add_argument("--jepa_window_start", type=int, default=None)
+    p.add_argument("--jepa_window_end", type=int, default=None)
     args = p.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     blob = torch.load(args.data, map_location="cpu", weights_only=False)
-    traj = blob["trajectories"]
+    traj = apply_pair_transform(
+        blob["trajectories"],
+        blob.get("labels"),
+        blob.get("fact_ids"),
+        mode=args.trajectory_transform,
+    )
     labels = blob["labels"]
     N, L, d = traj.shape
     y_np = labels.numpy()
@@ -87,7 +108,10 @@ def main():
     yte = labels[te_idx_t]
     print(f"train_pool={len(tr_pool)}  test={len(te_idx)}")
 
-    probe_factories = build_probes(d, L, args.jepa, args.single_layer, device, args.transformer_epochs)
+    probe_factories = build_probes(
+        d, L, args.jepa, args.single_layer, device, args.transformer_epochs,
+        args.jepa_pool, args.jepa_layer_idx, args.jepa_window_start, args.jepa_window_end,
+    )
 
     results: dict = {p: {n: [] for n in args.n_trains} for p in probe_factories}
 
@@ -130,6 +154,7 @@ def main():
     with open(out, "w") as f:
         json.dump({
             "data": args.data, "jepa": args.jepa,
+            "trajectory_transform": args.trajectory_transform,
             "n_trains": args.n_trains, "n_seeds": args.n_seeds,
             "single_layer": args.single_layer,
             "N_test": len(te_idx),

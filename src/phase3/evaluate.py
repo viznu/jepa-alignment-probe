@@ -18,6 +18,7 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from src.phase3.probes import (
     SingleLayerProbe, AllLayersConcatProbe, TransformerOverLayersProbe, JEPAFrozenProbe,
 )
+from src.phase3.pair_transforms import apply_pair_transform
 
 
 def recall_at_fpr(y_true: np.ndarray, scores: np.ndarray, fpr_target: float) -> float:
@@ -60,13 +61,26 @@ def main():
     p.add_argument("--transformer_epochs", type=int, default=30)
     p.add_argument("--group_field", default=None,
                    help="If set (e.g. 'fact_ids'), split by group so paired examples stay together.")
+    p.add_argument("--trajectory_transform", default="none",
+                   choices=["none", "pair_residualize", "pair_signed_delta"])
+    p.add_argument("--jepa_pool", default="mean",
+                   choices=["mean", "last", "mid", "layer", "window"])
+    p.add_argument("--jepa_layer_idx", type=int, default=None)
+    p.add_argument("--jepa_window_start", type=int, default=None)
+    p.add_argument("--jepa_window_end", type=int, default=None)
     args = p.parse_args()
 
     blob = torch.load(args.data, map_location="cpu", weights_only=False)
-    traj = blob["trajectories"]
+    traj = apply_pair_transform(
+        blob["trajectories"],
+        blob.get("labels"),
+        blob.get("fact_ids"),
+        mode=args.trajectory_transform,
+    )
     labels = blob["labels"]
     N, L, d = traj.shape
-    print(f"loaded {args.data}: N={N}  L={L}  d={d}  pos={int(labels.sum())} neg={int((1-labels).sum())}")
+    print(f"loaded {args.data}: N={N}  L={L}  d={d}  pos={int(labels.sum())} neg={int((1-labels).sum())} "
+          f"transform={args.trajectory_transform}")
 
     idx = np.arange(N)
     if args.group_field and args.group_field in blob:
@@ -123,11 +137,22 @@ def main():
 
     # 4. JEPA-frozen + logistic
     print("\n[4/4] JEPA-frozen + logistic")
-    probe4 = JEPAFrozenProbe(args.jepa, device=device)
+    probe4 = JEPAFrozenProbe(
+        args.jepa,
+        device=device,
+        pool=args.jepa_pool,
+        layer_idx=args.jepa_layer_idx,
+        window_start=args.jepa_window_start,
+        window_end=args.jepa_window_end,
+    )
     probe4.fit(Xtr, ytr)
     s4 = probe4.predict_score(Xte)
     results["jepa_frozen"] = {
         "jepa_ckpt": args.jepa,
+        "pool": args.jepa_pool,
+        "layer_idx": args.jepa_layer_idx,
+        "window_start": args.jepa_window_start,
+        "window_end": args.jepa_window_end,
         "test_auroc": float(roc_auc_score(yte.numpy(), s4)),
         "test_recall_at_1pct_fpr": recall_at_fpr(yte.numpy(), s4, 0.01),
     }
@@ -146,6 +171,7 @@ def main():
         json.dump({
             "data": args.data,
             "jepa": args.jepa,
+            "trajectory_transform": args.trajectory_transform,
             "N_train": len(tr_idx),
             "N_test": len(te_idx),
             "L": L, "d": d,

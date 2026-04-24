@@ -89,13 +89,18 @@ def main():
     p.add_argument("--output", default="data/instructed_pairs.pt")
     p.add_argument("--max_len", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--fact_label", default="1",
+                   help="CSV label to filter facts: '1' (true, default), '0' (false), or 'both'.")
     args = p.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device != "cpu" else torch.float32
 
     with open(args.facts_csv) as f:
-        rows = [r for r in csv.DictReader(f) if r["label"] == "1"]
+        if args.fact_label == "both":
+            rows = list(csv.DictReader(f))
+        else:
+            rows = [r for r in csv.DictReader(f) if r["label"] == args.fact_label]
     gen = torch.Generator().manual_seed(args.seed)
     perm = torch.randperm(len(rows), generator=gen).tolist()
     facts = [rows[j]["statement"] for j in perm[:args.n_facts]]
