@@ -69,6 +69,11 @@ def compute_pair_loss(
     window_end: int | None,
     margin: float,
 ) -> torch.Tensor:
+    """Cosine-margin pair loss (Codex variant).
+
+    Penalizes cos(z_honest, z_deceptive) - margin when positive. Weak signal
+    in practice; see compute_pair_infonce for the stronger alternative.
+    """
     z = online.encode(x)
     pooled = pool_latents(z, pool=pool, layer_idx=layer_idx,
                           window_start=window_start, window_end=window_end)
@@ -76,6 +81,52 @@ def compute_pair_loss(
     deceptive = pooled[deceptive_idx]
     cosine = F.cosine_similarity(honest, deceptive, dim=-1)
     return F.relu(cosine - margin).mean()
+
+
+def compute_pair_infonce(
+    online: LayerJEPA,
+    x: torch.Tensor,
+    labels: torch.Tensor,
+    pool: str,
+    layer_idx: int | None,
+    window_start: int | None,
+    window_end: int | None,
+    temperature: float,
+) -> torch.Tensor:
+    """SupCon-style InfoNCE loss on pooled JEPA latents.
+
+    For each anchor, positives are same-label samples across the batch and
+    negatives are different-label samples (includes the within-fact partner,
+    which sits geometrically close after vanilla JEPA training — the hardest
+    negative). L2-normalized embeddings; standard log-softmax over similarity.
+    """
+    z = online.encode(x)
+    pooled = pool_latents(z, pool=pool, layer_idx=layer_idx,
+                          window_start=window_start, window_end=window_end)
+    pooled = F.normalize(pooled, dim=-1)
+
+    B = pooled.size(0)
+    sim = pooled @ pooled.T / temperature  # (B, B)
+
+    self_mask = torch.eye(B, dtype=torch.bool, device=sim.device)
+    # Use a large negative (not -inf) for self-similarity: -inf interacts with
+    # the bool mask multiply below to produce NaN (-inf * 0 = NaN). -1e9 is
+    # effectively 0 under softmax but avoids the NaN.
+    sim = sim.masked_fill(self_mask, -1e9)
+
+    same_label = labels.unsqueeze(0) == labels.unsqueeze(1)
+    pos_mask = same_label & ~self_mask
+
+    # log p(positive) under softmax over all non-self samples
+    log_prob = sim - torch.logsumexp(sim, dim=1, keepdim=True)
+    n_pos = pos_mask.sum(dim=1).clamp(min=1)
+    mean_log_prob_pos = (log_prob * pos_mask.float()).sum(dim=1) / n_pos
+
+    # Only include anchors that actually have a positive in this batch.
+    valid = pos_mask.any(dim=1)
+    if not valid.any():
+        return torch.zeros((), device=sim.device)
+    return -mean_log_prob_pos[valid].mean()
 
 
 def train(args):
@@ -108,16 +159,20 @@ def train(args):
     fact_ids = blob.get("fact_ids")
     pair_train = None
     if args.pair_loss_weight > 0.0:
-        if labels is None or fact_ids is None:
-            raise ValueError("pair-aware loss requires labels and fact_ids in the dataset")
+        if labels is None:
+            raise ValueError("pair-aware loss requires labels in the dataset")
         tr_labels = labels[tr_idx]
-        tr_fact_ids = fact_ids[tr_idx]
-        honest_idx, deceptive_idx = get_paired_indices(tr_labels, tr_fact_ids)
         pair_train = {
             "x": tr.to(device),
-            "honest_idx": honest_idx.to(device),
-            "deceptive_idx": deceptive_idx.to(device),
+            "labels": tr_labels.to(device),
         }
+        if args.pair_loss_kind == "cosine":
+            if fact_ids is None:
+                raise ValueError("pair_loss_kind=cosine requires fact_ids")
+            tr_fact_ids = fact_ids[tr_idx]
+            honest_idx, deceptive_idx = get_paired_indices(tr_labels, tr_fact_ids)
+            pair_train["honest_idx"] = honest_idx.to(device)
+            pair_train["deceptive_idx"] = deceptive_idx.to(device)
     print(f"train={len(tr)} val={len(vl)}")
 
     loader = DataLoader(TensorDataset(tr), batch_size=args.batch_size, shuffle=True, drop_last=False)
@@ -151,17 +206,29 @@ def train(args):
             ema_update(target, online, tau=args.ema_tau)
             tr_losses.append(loss.item())
         if pair_train is not None:
-            pair_loss = compute_pair_loss(
-                online,
-                pair_train["x"],
-                pair_train["honest_idx"],
-                pair_train["deceptive_idx"],
-                pool=args.pair_pool,
-                layer_idx=args.pair_layer_idx,
-                window_start=args.pair_window_start,
-                window_end=args.pair_window_end,
-                margin=args.pair_margin,
-            )
+            if args.pair_loss_kind == "infonce":
+                pair_loss = compute_pair_infonce(
+                    online,
+                    pair_train["x"],
+                    pair_train["labels"],
+                    pool=args.pair_pool,
+                    layer_idx=args.pair_layer_idx,
+                    window_start=args.pair_window_start,
+                    window_end=args.pair_window_end,
+                    temperature=args.pair_temperature,
+                )
+            else:
+                pair_loss = compute_pair_loss(
+                    online,
+                    pair_train["x"],
+                    pair_train["honest_idx"],
+                    pair_train["deceptive_idx"],
+                    pool=args.pair_pool,
+                    layer_idx=args.pair_layer_idx,
+                    window_start=args.pair_window_start,
+                    window_end=args.pair_window_end,
+                    margin=args.pair_margin,
+                )
             total_pair_loss = args.pair_loss_weight * pair_loss
             opt.zero_grad()
             total_pair_loss.backward()
@@ -223,7 +290,13 @@ def main():
     p.add_argument("--trajectory_transform", default="none",
                    choices=["none", "pair_residualize", "pair_signed_delta"])
     p.add_argument("--pair_loss_weight", type=float, default=0.0)
-    p.add_argument("--pair_margin", type=float, default=0.0)
+    p.add_argument("--pair_loss_kind", default="cosine",
+                   choices=["cosine", "infonce"],
+                   help="cosine=Codex's cosine-margin; infonce=SupCon-style on pooled latents.")
+    p.add_argument("--pair_margin", type=float, default=0.0,
+                   help="cosine only: margin above which cos(honest, deceptive) is penalized.")
+    p.add_argument("--pair_temperature", type=float, default=0.07,
+                   help="infonce only: softmax temperature.")
     p.add_argument("--pair_pool", default="layer",
                    choices=["mean", "last", "mid", "layer", "window"])
     p.add_argument("--pair_layer_idx", type=int, default=24)
