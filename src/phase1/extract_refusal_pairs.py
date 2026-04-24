@@ -24,6 +24,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 REFUSE = "I'm sorry, but I can't help with that request."
 COMPLY = "Sure, here's how to accomplish that:"
 
+# Lexically-matched variants: both start with an identical 7-token prefix
+# before diverging into refusal vs compliance. Purpose: sanity-test whether
+# the probe is picking up the "I'm sorry" / "Sure" lexical marker or the
+# behavioral state beneath it.
+REFUSE_MATCHED = "Let me think about this carefully. My response is that I cannot help with this."
+COMPLY_MATCHED = "Let me think about this carefully. Here are the steps to accomplish this:"
+
 
 def build_prompt(tokenizer, user_turn: str, assistant_prefill: str,
                  drop_last_n: int) -> str:
@@ -38,7 +45,8 @@ def build_prompt(tokenizer, user_turn: str, assistant_prefill: str,
 
 
 def extract(model_name: str, prompts: list[str], device: str, dtype: torch.dtype,
-            drop_last_n: int, max_len: int):
+            drop_last_n: int, max_len: int,
+            refuse_prefill: str = REFUSE, comply_prefill: str = COMPLY):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device).eval()
     layers = model.model.layers
@@ -56,7 +64,7 @@ def extract(model_name: str, prompts: list[str], device: str, dtype: torch.dtype
             return hook
         handles.append(layer.register_forward_hook(make_hook(i)))
 
-    conditions = [(REFUSE, 0), (COMPLY, 1)]
+    conditions = [(refuse_prefill, 0), (comply_prefill, 1)]
     N = len(prompts) * len(conditions)
     traj = torch.zeros(N, L, d, dtype=torch.float32)
     labels = torch.zeros(N, dtype=torch.long)
@@ -91,7 +99,18 @@ def main():
     p.add_argument("--drop_last_n", type=int, default=5)
     p.add_argument("--max_len", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--prefill_mode", default="distinct",
+                   choices=["distinct", "matched"],
+                   help="'distinct' (default) uses lexically-different prefills "
+                        "('I'm sorry...' vs 'Sure...'). 'matched' uses prefills "
+                        "with an identical 7-token prefix before diverging, to "
+                        "test whether the probe relies on lexical markers.")
     args = p.parse_args()
+    refuse_prefill = REFUSE_MATCHED if args.prefill_mode == "matched" else REFUSE
+    comply_prefill = COMPLY_MATCHED if args.prefill_mode == "matched" else COMPLY
+    print(f"prefill_mode={args.prefill_mode}")
+    print(f"  refuse: {refuse_prefill!r}")
+    print(f"  comply: {comply_prefill!r}")
 
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device != "cpu" else torch.float32
@@ -104,6 +123,7 @@ def main():
 
     traj, labels, prompt_ids, rendered, L, d = extract(
         args.model, prompts, device, dtype, args.drop_last_n, args.max_len,
+        refuse_prefill=refuse_prefill, comply_prefill=comply_prefill,
     )
 
     out = Path(args.output)
@@ -120,8 +140,9 @@ def main():
         "num_layers": L,
         "hidden_dim": d,
         "token_position": "last_prefilled_token",
-        "refuse_prefill": REFUSE,
-        "comply_prefill": COMPLY,
+        "prefill_mode": args.prefill_mode,
+        "refuse_prefill": refuse_prefill,
+        "comply_prefill": comply_prefill,
         "drop_last_n": args.drop_last_n,
     }, out)
     print(f"saved shape={tuple(traj.shape)} labels={len(labels)} prompts={len(prompts)} -> {out}")
