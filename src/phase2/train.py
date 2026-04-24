@@ -131,7 +131,17 @@ def compute_pair_infonce(
 
 def train(args):
     device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device={device}")
+    print(f"device={device}  seed={args.seed}  main_loss_weight={args.main_loss_weight}  "
+          f"pair_loss_weight={args.pair_loss_weight}")
+
+    # Seed torch so model init + dropout + mask sampling are reproducible across runs.
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    try:
+        torch.mps.manual_seed(args.seed)
+    except (AttributeError, RuntimeError):
+        pass
 
     blob = torch.load(args.data, map_location="cpu", weights_only=False)
     traj = blob["trajectories"]  # (N, L, d)
@@ -198,7 +208,7 @@ def train(args):
         for (x,) in loader:
             x = x.to(device)
             mask = random_block_mask(x.size(0), L, ratio=args.mask_ratio, device=device)
-            loss = compute_loss(online, target, x, mask)
+            loss = compute_loss(online, target, x, mask) * args.main_loss_weight
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(online.parameters(), 1.0)
@@ -289,6 +299,9 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--trajectory_transform", default="none",
                    choices=["none", "pair_residualize", "pair_signed_delta"])
+    p.add_argument("--main_loss_weight", type=float, default=1.0,
+                   help="Weight on masked-reconstruction JEPA loss. Set to 0 for "
+                        "InfoNCE-only ablation (plain contrastive transformer, no JEPA).")
     p.add_argument("--pair_loss_weight", type=float, default=0.0)
     p.add_argument("--pair_loss_kind", default="cosine",
                    choices=["cosine", "infonce"],
