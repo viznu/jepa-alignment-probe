@@ -45,7 +45,10 @@ def load_jepa(ckpt_path: str, device: str = "cpu") -> tuple[LayerJEPA, torch.Ten
     return model, ckpt["norm_mean"].to(device), ckpt["norm_std"].to(device), ckpt["d_in"], ckpt["L"]
 
 
-def jepa_score_one(encoder: LayerJEPA, x: torch.Tensor, pool: str = "mean") -> float:
+def jepa_score_one(encoder: LayerJEPA, x: torch.Tensor, pool: str = "mean",
+                   layer_idx: int | None = None,
+                   window_start: int | None = None,
+                   window_end: int | None = None) -> float:
     """JEPA-SCORE for a single trajectory x of shape (1, L, d_in).
 
     Implements eq 5: sum_k log sigma_k(J_f(x)) where J is the Jacobian of
@@ -60,6 +63,14 @@ def jepa_score_one(encoder: LayerJEPA, x: torch.Tensor, pool: str = "mean") -> f
         if pool == "mid":
             mid = z.size(1) // 2
             return z[:, mid, :]
+        if pool == "layer":
+            if layer_idx is None:
+                raise ValueError("pool='layer' requires --layer_idx")
+            return z[:, layer_idx, :]
+        if pool == "window":
+            if window_start is None or window_end is None:
+                raise ValueError("pool='window' requires --window_start/--window_end")
+            return z[:, window_start:window_end, :].mean(dim=1)
         raise ValueError(pool)
 
     J = jacobian(enc_pool, x)  # (1, d_model, 1, L, d_in)
@@ -70,10 +81,16 @@ def jepa_score_one(encoder: LayerJEPA, x: torch.Tensor, pool: str = "mean") -> f
 
 
 def jepa_score_batch(encoder: LayerJEPA, X: torch.Tensor, pool: str = "mean",
+                     layer_idx: int | None = None,
+                     window_start: int | None = None,
+                     window_end: int | None = None,
                      desc: str = "jepa-score") -> np.ndarray:
     scores = np.zeros(X.size(0), dtype=np.float64)
     for i in tqdm(range(X.size(0)), desc=desc):
-        scores[i] = jepa_score_one(encoder, X[i:i + 1], pool=pool)
+        scores[i] = jepa_score_one(
+            encoder, X[i:i + 1], pool=pool,
+            layer_idx=layer_idx, window_start=window_start, window_end=window_end,
+        )
     return scores
 
 
@@ -84,6 +101,9 @@ def main():
     p.add_argument("--output", required=True)
     p.add_argument("--group_field", default="fact_ids")
     p.add_argument("--pool", default="mean")
+    p.add_argument("--layer_idx", type=int, default=None)
+    p.add_argument("--window_start", type=int, default=None)
+    p.add_argument("--window_end", type=int, default=None)
     args = p.parse_args()
 
     device = "cpu"  # Jacobian on MPS hits unsupported ops; CPU is fine for small batches
@@ -98,7 +118,10 @@ def main():
 
     X = ((traj - norm_mean.cpu()) / norm_std.cpu()).to(device)
 
-    scores = jepa_score_batch(encoder, X, pool=args.pool)
+    scores = jepa_score_batch(
+        encoder, X, pool=args.pool,
+        layer_idx=args.layer_idx, window_start=args.window_start, window_end=args.window_end,
+    )
 
     y = labels.numpy()
     # Convention: label 1 = misaligned. JEPA-SCORE is high for in-distribution,
@@ -123,6 +146,9 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     result = {
         "data": args.data, "jepa": args.jepa, "pool": args.pool,
+        "layer_idx": args.layer_idx,
+        "window_start": args.window_start,
+        "window_end": args.window_end,
         "N": int(N),
         "jepa_score": scores.tolist(),
         "labels": y.tolist(),
