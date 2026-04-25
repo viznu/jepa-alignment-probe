@@ -6,8 +6,6 @@ venv/
 .env
 
 # Large data / model files — should live on HF Hub or local disk, not git.
-# Exception: data/external/ holds small reference datasets (CSVs from
-# external sources that we want version-tracked).
 data/*
 !data/external/
 *.pt
@@ -15,8 +13,3 @@ data/*
 *.bin
 *.safetensors
 *.ckpt
-
-# Local result artifacts (figures are kept; named iter*.json results are tracked)
-results/_*.json
-results/*.pkl
-results/*.npy
