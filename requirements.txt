@@ -1,7 +1,0 @@
-torch>=2.4
-transformers>=4.45
-datasets>=3.0
-numpy
-pyyaml
-tqdm
-scikit-learn>=1.3
